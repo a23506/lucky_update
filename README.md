@@ -10,24 +10,33 @@
 * **双平台通知**：集成 Telegram 和企业微信 Webhook 通知，支持 Markdown 格式，实时反馈更新状态、版本号及编译日期。
 
 ## 🚀 一键部署
-```bash
-curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash
-```
-
-## 带webhook通知的URL
-``` bash
-curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash -s -- -t "你的TG_TOKEN" -i "你的TG_ID" -w "你的微信URL" -d "设备名称"
-```
-
-# 配置定时任务
-
 ## 创建日志文件
 ``` bash
 touch /var/log/lucky_update.log && chmod 666 /var/log/lucky_update.log
 ```
 
+## 配置env
+```bash
+cat <<EOF > /opt/lucky/.env
+# Lucky 更新webhook自动化配置
+TG_TOKEN="你的TG_TOKEN"
+TG_ID="你的TG_ID"
+WX_URL="你的微信Webhook地址"
+DOMAIN="节点名称"
+EOF
+
+# 修改权限，仅 root 可读写
+chmod 600 /opt/lucky/.env
+```
+
+## 带webhook通知的命令
+``` bash
+export $(cat /opt/lucky/.env | xargs) && curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash -s -- -t "$TG_TOKEN" -i "$TG_ID" -w "$WX_URL" -d "$DOMAIN"
+```
+
+# 配置定时任务
 ``` bash
 # 复制这一整段到终端执行，它会自动帮你把带参数的远程定时任务写进 crontab
 # 每天凌晨 02:30 远程拉取脚本并带参数执行
-(crontab -l 2>/dev/null | grep -v "lucky_update"; echo "30 2 * * * curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash -s -- -t '你的TG_TOKEN' -i '你的TG_ID' -w '你的企业微信URL' -d '节点名' >> /var/log/lucky_update.log 2>&1") | crontab -
+(crontab -l 2>/dev/null | grep -v "lucky_update"; echo "30 2 * * * export $(grep -v '^#' /opt/lucky/.env | xargs) && curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash -s -- -t "${TG_TOKEN:-}" -i "${TG_ID:-}" -w "${WX_URL:-}" -d "${DOMAIN:-}" >> /var/log/lucky_update.log 2>&1") | crontab -
 ```
