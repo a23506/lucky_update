@@ -27,6 +27,7 @@ touch /var/log/lucky_update.log && chmod 666 /var/log/lucky_update.log
 ```
 
 ``` bash
+# 复制这一整段到终端执行，它会自动帮你把带参数的远程定时任务写进 crontab
 # 每天凌晨 02:30 远程拉取脚本并带参数执行
-30 2 * * * curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash -s -- -t "你的TG_TOKEN" -i "你的TG_ID" -w "你的微信URL" -d "设备名称" >> /var/log/lucky_update.log 2>&1
+(crontab -l 2>/dev/null | grep -v "lucky_update"; echo "30 2 * * * curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash -s -- -t '你的TG_TOKEN' -i '你的TG_ID' -w '你的企业微信URL' -d '节点名' >> /var/log/lucky_update.log 2>&1") | crontab -
 ```
