@@ -22,7 +22,7 @@ cat <<EOF > /opt/lucky.daji/.env
 TG_TOKEN="你的TG_TOKEN"
 TG_ID="你的TG_ID"
 WX_URL="你的微信Webhook地址"
-DOMAIN="节点名称"
+DOMAIN="$(hostname)"
 EOF
 
 # 修改权限，仅 root 可读写
