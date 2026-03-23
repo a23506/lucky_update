@@ -4,7 +4,7 @@
 BASE_URL="http://release.66666.host"
 INSTALL_ROOT="/opt"
 LUCKY_DIR="$INSTALL_ROOT/lucky.daji"
-VER_RECORD="$LUCKY_DIR/.version"
+VER_RECORD="$LUCKY_DIR/.version"  # 新增：版本记录文件
 CONF_FILE="$LUCKY_DIR/lucky.conf"
 SERVICE_FILE="/lib/systemd/system/lucky.daji.service"
 LOG_FILE="/var/log/lucky_update.log"
@@ -40,14 +40,15 @@ get_arch() {
 }
 CPUTYPE=$(get_arch)
 
-# 2. 获取本地版本 (优先读取记录文件，没有则读取二进制信息)
+# 2. 获取本地版本 (优先从存根文件读取完整 Tag)
 if [ -f "$VER_RECORD" ]; then
     LOCAL_TAG=$(cat "$VER_RECORD")
 else
+    # 如果没有存根，尝试从二进制获取作为保底
     [ -f "$LUCKY_DIR/lucky" ] && LOCAL_TAG="v$($LUCKY_DIR/lucky -info | grep -oP '(?<="Version":")[^"]+')" || LOCAL_TAG="none"
 fi
 
-# 3. 抓取远程最新 Tag (例如 v3.0.0beta4)
+# 3. 抓取远程最新完整 Tag (例如 v3.0.0beta4)
 REMOTE_TAG=$(curl -s "$BASE_URL/" | grep -oP '(?<=href="\.\/)[^"/]+' | grep '^v' | sort -V | tail -n 1)
 
 if [ -z "$REMOTE_TAG" ]; then
@@ -55,7 +56,7 @@ if [ -z "$REMOTE_TAG" ]; then
     exit 1
 fi
 
-# 版本比对 (直接比对完整 Tag 字符串)
+# 4. 版本比对 (字符串完全匹配)
 if [ "$LOCAL_TAG" == "$REMOTE_TAG" ]; then
     echo -e "${GREEN}✅ 当前已是最新版本 ($LOCAL_TAG)${NC}"
     find /var/log -name "lucky_update.log" -mtime +7 -exec truncate -s 0 {} \;
@@ -63,32 +64,38 @@ if [ "$LOCAL_TAG" == "$REMOTE_TAG" ]; then
     exit 0
 fi
 
-echo -e "${YELLOW}🔔 发现新版本: $REMOTE_TAG (当前: $LOCAL_TAG)，开始更新...${NC}"
+echo -e "${YELLOW}🔔 发现新版本: $REMOTE_TAG (当前记录: $LOCAL_TAG)，开始更新...${NC}"
 
-# 4. 智能路径解析
-REMOTE_VER=${REMOTE_TAG#v}
+# 5. 智能下载路径处理
+REMOTE_VER=${REMOTE_TAG#v} # 去掉 v
 BASE_VER=$(echo "$REMOTE_VER" | grep -oP '^\d+\.\d+\.\d+')
 TMP_FILE="/tmp/lucky_update.tar.gz"
 
-# 构造两种可能的路径
+# 构造两种可能存在的下载路径 (适配官方有时用 BaseVer 有时用 RemoteVer 的习惯)
 URL1="$BASE_URL/$REMOTE_TAG/${BASE_VER}_wanji_docker/lucky_${BASE_VER}_Linux_${CPUTYPE}_wanji_docker.tar.gz"
 URL2="$BASE_URL/$REMOTE_TAG/${REMOTE_VER}_wanji_docker/lucky_${REMOTE_VER}_Linux_${CPUTYPE}_wanji_docker.tar.gz"
 
+DOWNLOAD_URL=""
 if curl -fL -# -o "$TMP_FILE" "$URL1"; then
-    echo -e "${GREEN}下载成功 (路径1)${NC}"
+    DOWNLOAD_URL=$URL1
 elif curl -fL -# -o "$TMP_FILE" "$URL2"; then
-    echo -e "${GREEN}下载成功 (路径2)${NC}"
+    DOWNLOAD_URL=$URL2
 else
-    echo -e "${RED}❌ 下载失败 (404)${NC}" && exit 1
+    echo -e "${RED}❌ 下载失败 (404) - 请检查 $REMOTE_TAG 路径结构${NC}" && exit 1
 fi
 
-# 5. 安装与目录处理
+# 6. 安装与目录处理
 [ ! -d "$LUCKY_DIR" ] && mkdir -p "$LUCKY_DIR"
+[ ! -f "$CONF_FILE" ] && touch "$CONF_FILE"
 tar -zxf "$TMP_FILE" -C "$LUCKY_DIR/" --strip-components=0
 chmod +x "$LUCKY_DIR/lucky"
-echo "$REMOTE_TAG" > "$VER_RECORD" # 更新成功后记录 Tag
+[ -d "$LUCKY_DIR/scripts" ] && chmod +x "$LUCKY_DIR/scripts/"*
 
-# 6. 同步 Systemd (保持官方标准)
+# 成功安装后，立即更新本地存根文件
+echo "$REMOTE_TAG" > "$VER_RECORD"
+
+# 7. 同步官方 Systemd 配置
+echo -e "${YELLOW}⚙️ 同步官方 Systemd 配置...${NC}"
 cat <<EOF > "$SERVICE_FILE"
 [Unit]
 Description=lucky
@@ -112,21 +119,31 @@ EOF
 systemctl daemon-reload
 systemctl enable lucky.daji
 
-# 7. 重启服务
+# 8. 重启服务
 echo -e "${YELLOW}🔄 正在重启 Lucky 服务...${NC}"
+if command -v netstat >/dev/null 2>&1; then
+    netstat -tunlp | grep 16601 | awk '{print $7}' | cut -d'/' -f1 | xargs -r kill -9 2>/dev/null
+fi
 systemctl restart lucky.daji
 sleep 2
 
-# 8. 统计与通知
+# 9. 统计与通知
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
 MSG="Lucky 自动部署/更新成功\n----------------------\n主机: $(hostname)\n节点: ${DOMAIN:-AWS-Node}\n架构: $CPUTYPE\n版本: $LOCAL_TAG -> $REMOTE_TAG\n耗时: ${DURATION}s\n时间: $(date '+%Y-%m-%d %H:%M:%S')"
 
-[ -n "$TG_TOKEN" ] && [ -n "$TG_ID" ] && curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" -d "chat_id=$TG_ID" -d "text=$(echo -e "$MSG")" > /dev/null
-[ -n "$WX_URL" ] && curl -s -H "Content-Type: application/json" -X POST "$WX_URL" -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"$MSG\"}}" > /dev/null
+if [ -n "$TG_TOKEN" ] && [ -n "$TG_ID" ]; then
+    echo -e "${YELLOW}检测到 Telegram 配置，正在发送通知...${NC}"
+    curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" -d "chat_id=$TG_ID" -d "text=$(echo -e "$MSG")" > /dev/null
+fi
 
-# 9. 日志清理
+if [ -n "$WX_URL" ]; then
+    echo -e "${YELLOW}检测到企业微信配置，正在发送通知...${NC}"
+    curl -s -H "Content-Type: application/json" -X POST "$WX_URL" -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"$MSG\"}}" > /dev/null
+fi
+
+# 10. 日志清理 (保留7天)
 find /var/log -name "lucky_update.log" -mtime +7 -exec truncate -s 0 {} \;
 
 rm -f "$TMP_FILE"
