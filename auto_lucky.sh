@@ -50,16 +50,27 @@ fi
 echo "发现新版本: $REMOTE_VER，正在为 $CPUTYPE 架构进行更新..."
 
 # 5. 动态拼接下载地址
+# 注意：官方路径中，大版本目录带 v，子目录也可能包含 beta 字样
 SUBDIR="${REMOTE_VER}_wanji_docker"
+# 关键修正：有些版本的包名中，版本号可能不带 'v'，但路径需要
 PKG_NAME="lucky_${REMOTE_VER}_Linux_${CPUTYPE}_wanji_docker.tar.gz"
+
+# 尝试拼接完整的 URL
 DOWNLOAD_URL="$BASE_URL/$REMOTE_TAG/$SUBDIR/$PKG_NAME"
 
-# 6. 下载并替换 (静默安装)
+# 6. 下载并替换 (增加 -f 参数检查服务器返回码)
 TMP_FILE="/tmp/lucky_update.tar.gz"
-curl -L -o "$TMP_FILE" "$DOWNLOAD_URL"
+echo "正在下载: $DOWNLOAD_URL"
+# 使用 -f 让 curl 在 404 时返回非零状态码
+curl -fL -o "$TMP_FILE" "$DOWNLOAD_URL"
+
 if [ $? -ne 0 ]; then
-    echo "下载失败，请检查网络。"
-    exit 1
+    echo "❌ 下载失败！请检查链接是否有效: $DOWNLOAD_URL"
+    # 这里可以增加一个兜底逻辑，尝试另一种可能的路径格式
+    echo "尝试备用路径..."
+    # 有些版本子目录可能直接是 wanji_docker 而没有版本号前缀
+    ALT_URL="$BASE_URL/$REMOTE_TAG/wanji_docker/$PKG_NAME"
+    curl -fL -o "$TMP_FILE" "$ALT_URL" || exit 1
 fi
 
 # 解压覆盖并清理
