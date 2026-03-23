@@ -9,9 +9,15 @@ BACKUP_DIR="$LUCKY_DIR/backup"
 VER_RECORD="$LUCKY_DIR/.version"
 CONF_FILE="$LUCKY_DIR/lucky.conf"
 SERVICE_FILE="/etc/systemd/system/lucky.daji.service"
+OLD_SERVICE_FILE="/lib/systemd/system/lucky.daji.service"
 LOG_FILE="/var/log/lucky_update.log"
 LOCK_FILE="/var/run/lucky_update.lock"
 START_TIME=$(date +%s)
+
+# ================= 运行状态标记 =================
+ROLLBACK_READY=0
+DEPLOY_STARTED=0
+ROLLBACK_DONE=0
 
 # ================= 日志接管 =================
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -81,9 +87,57 @@ notify_all() {
     fi
 }
 
+build_node_line() {
+    if [ -n "${DOMAIN:-}" ]; then
+        printf '节点: %s\n' "$DOMAIN"
+    fi
+}
+
+rollback_install() {
+    if [ "$ROLLBACK_READY" -ne 1 ] || [ "$DEPLOY_STARTED" -ne 1 ] || [ "$ROLLBACK_DONE" -eq 1 ]; then
+        return 0
+    fi
+
+    echo "⚠️ 检测到部署失败，开始自动回滚主程序..."
+    mkdir -p "$LUCKY_DIR"
+
+    # 删除当前安装目录中除 backup 外的所有内容
+    find "$LUCKY_DIR" -mindepth 1 -maxdepth 1 ! -name backup -exec rm -rf {} +
+
+    # 恢复旧程序文件（保留新的 backup 目录）
+    if [ -d "${ROLLBACK_DIR:-}" ]; then
+        ( cd "$ROLLBACK_DIR" && tar -cf - . ) | ( cd "$LUCKY_DIR" && tar -xf - )
+    fi
+
+    # 恢复旧 service 文件（如果之前有）
+    if [ -f "${SERVICE_BACKUP:-}" ]; then
+        cp -af "$SERVICE_BACKUP" "$SERVICE_FILE"
+    fi
+
+    rm -f "$OLD_SERVICE_FILE" 2>/dev/null || true
+    systemctl daemon-reload || true
+
+    if [ -x "$LUCKY_DIR/lucky" ]; then
+        systemctl restart lucky.daji || true
+        sleep 2
+        if systemctl is-active --quiet lucky.daji; then
+            echo "✅ 回滚完成，Lucky 服务已恢复启动"
+        else
+            echo "⚠️ 回滚后的 Lucky 服务未成功启动，请手动检查"
+            journalctl -u lucky.daji -n 50 --no-pager || true
+        fi
+    else
+        echo "⚠️ 回滚后未找到可执行主程序，请手动检查"
+    fi
+
+    ROLLBACK_DONE=1
+}
+
 cleanup() {
     [ -n "${TMP_FILE:-}" ] && [ -f "${TMP_FILE:-}" ] && rm -f "$TMP_FILE"
     [ -n "${STAGE_DIR:-}" ] && [ -d "${STAGE_DIR:-}" ] && rm -rf "$STAGE_DIR"
+    [ -n "${ROLLBACK_DIR:-}" ] && [ -d "${ROLLBACK_DIR:-}" ] && rm -rf "$ROLLBACK_DIR"
+    [ -n "${SERVICE_BACKUP:-}" ] && [ -f "${SERVICE_BACKUP:-}" ] && rm -f "$SERVICE_BACKUP"
     [ -f "$LOCK_FILE" ] && rm -f "$LOCK_FILE"
 }
 trap cleanup EXIT
@@ -91,19 +145,27 @@ trap cleanup EXIT
 on_error() {
     local line_no="$1"
     local exit_code="${2:-1}"
-    local end_time
-    end_time=$(date +%s)
-    local duration=$((end_time - START_TIME))
+    local end_time duration node_line msg
 
-    local msg="Lucky 自动部署/更新失败
+    rollback_install || true
+
+    end_time=$(date +%s)
+    duration=$((end_time - START_TIME))
+    node_line="$(build_node_line)"
+
+    msg="Lucky 自动部署/更新失败
 ----------------------
 主机: $(hostname)
-节点: ${DOMAIN:-AWS-Node}
-时间: $(date '+%Y-%m-%d %H:%M:%S')
+${node_line}时间: $(date '+%Y-%m-%d %H:%M:%S')
 耗时: ${duration}s
 出错行: ${line_no}
 退出码: ${exit_code}
 日志: ${LOG_FILE}"
+
+    if [ "$ROLLBACK_DONE" -eq 1 ]; then
+        msg="${msg}
+回滚: 已执行自动回滚（已保留新的 backup 配置备份）"
+    fi
 
     echo -e "${RED}${msg}${NC}"
     notify_all "$msg"
@@ -184,6 +246,8 @@ BASE_VER="$(printf '%s' "$REMOTE_VER" | grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+')"
 
 TMP_FILE="$(mktemp /tmp/lucky_update.XXXXXX.tar.gz)"
 STAGE_DIR="$(mktemp -d /tmp/lucky_stage.XXXXXX)"
+ROLLBACK_DIR="$(mktemp -d /tmp/lucky_rollback.XXXXXX)"
+SERVICE_BACKUP="$(mktemp /tmp/lucky_service_backup.XXXXXX)"
 
 URL1="$BASE_URL/$REMOTE_TAG/${BASE_VER}_wanji_docker/lucky_${BASE_VER}_Linux_${CPUTYPE}_wanji_docker.tar.gz"
 URL2="$BASE_URL/$REMOTE_TAG/${REMOTE_VER}_wanji_docker/lucky_${REMOTE_VER}_Linux_${CPUTYPE}_wanji_docker.tar.gz"
@@ -267,11 +331,9 @@ chmod +x "$STAGE_DIR/lucky"
 backup_lkcf_configs() {
     mkdir -p "$LUCKY_DIR"
 
-    # 覆盖式备份：每次先清空旧 backup
     rm -rf "$BACKUP_DIR"
     mkdir -p "$BACKUP_DIR"
 
-    # 仅备份 /opt/lucky.daji 目录下所有 .lkcf 文件（包含子目录）
     if find "$LUCKY_DIR" -type f -name '*.lkcf' | grep -q .; then
         while IFS= read -r file; do
             rel_path="${file#"$LUCKY_DIR"/}"
@@ -281,12 +343,40 @@ backup_lkcf_configs() {
         done < <(find "$LUCKY_DIR" -type f -name '*.lkcf')
         echo "✅ 配置备份完成，备份目录: $BACKUP_DIR"
     else
-        echo "ℹ️ 未发现 .lkcf 配置文件，跳过备份"
+        echo "ℹ️ 未发现 .lkcf 配置文件，已创建空的 backup 目录"
     fi
 }
 backup_lkcf_configs
 
+# ================= 制作回滚快照（排除 backup） =================
+prepare_rollback_snapshot() {
+    mkdir -p "$LUCKY_DIR"
+
+    if [ -d "$LUCKY_DIR" ]; then
+        (
+            cd "$LUCKY_DIR"
+            tar --exclude='./backup' -cf - .
+        ) | (
+            cd "$ROLLBACK_DIR"
+            tar -xf -
+        )
+    fi
+
+    if [ -f "$SERVICE_FILE" ]; then
+        cp -af "$SERVICE_FILE" "$SERVICE_BACKUP"
+    elif [ -f "$OLD_SERVICE_FILE" ]; then
+        cp -af "$OLD_SERVICE_FILE" "$SERVICE_BACKUP"
+    else
+        : > "$SERVICE_BACKUP"
+    fi
+
+    ROLLBACK_READY=1
+    echo "✅ 已创建回滚快照（不会覆盖新的 backup 配置备份）"
+}
+prepare_rollback_snapshot
+
 # ================= 安装覆盖 =================
+DEPLOY_STARTED=1
 mkdir -p "$LUCKY_DIR"
 cp -af "$STAGE_DIR/." "$LUCKY_DIR/"
 
@@ -317,7 +407,7 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-[ -f "/lib/systemd/system/lucky.daji.service" ] && rm -f "/lib/systemd/system/lucky.daji.service"
+[ -f "$OLD_SERVICE_FILE" ] && rm -f "$OLD_SERVICE_FILE"
 
 systemctl daemon-reload
 systemctl enable lucky.daji >/dev/null 2>&1 || true
@@ -336,15 +426,18 @@ fi
 # ================= 成功后写入版本 =================
 echo "$REMOTE_TAG" > "$VER_RECORD"
 
+# 成功后不再允许回滚
+DEPLOY_STARTED=0
+
 # ================= 通知 =================
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
+NODE_LINE="$(build_node_line)"
 
 MSG="Lucky 自动部署/更新成功
 ----------------------
 主机: $(hostname)
-节点: ${DOMAIN:-AWS-Node}
-架构: $CPUTYPE
+${NODE_LINE}架构: $CPUTYPE
 版本: $LOCAL_TAG -> $REMOTE_TAG
 备份目录: $BACKUP_DIR
 耗时: ${DURATION}s
