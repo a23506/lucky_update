@@ -1,5 +1,7 @@
 #!/bin/bash
 
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 # ================= 默认配置区域 =================
 BASE_URL="http://release.66666.host"
 INSTALL_ROOT="/opt"
