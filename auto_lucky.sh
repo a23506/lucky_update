@@ -122,27 +122,24 @@ if command -v netstat >/dev/null 2>&1; then
 fi
 systemctl restart lucky.daji
 
-# 8. 获取新版本信息并发送通知
-NEW_INFO=$("$LUCKY_DIR/lucky" -info)
-NEW_VER=$(echo "$NEW_INFO" | grep -oP '(?<="Version":")[^"]+')
-NEW_DATE=$(echo "$NEW_INFO" | grep -oP '(?<="Date":")[^"]+')
-WAN_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || echo "未知")
+# 8. 发送通知 (增加非空校验)
 
-# 统一纯文本消息格式
-MSG="Lucky 自动部署/更新成功\n----------------------\n主机: $(hostname)\n节点: $DOMAIN\nIP: $WAN_IP\n架构: $CPUTYPE\n版本: $LOCAL_VER -> $NEW_VER\n编译: $NEW_DATE"
+# 只要 LOCAL_VER 和 NEW_VER 存在，就构建消息
+MSG="Lucky 自动部署/更新成功\n----------------------\n主机: $(hostname)\n节点: $DOMAIN\nIP: $WAN_IP\n架构: $CPUTYPE\n版本: $LOCAL_VER -> $NEW_VER"
 
-# Telegram 通知
+# Telegram: 只有当 TOKEN 和 ID 都不为空时才执行
 if [ -n "$TG_TOKEN" ] && [ -n "$TG_ID" ]; then
+    echo "检测到 Telegram 配置，正在发送通知..."
     curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
         -d "chat_id=$TG_ID" \
         -d "text=$(echo -e "$MSG")" > /dev/null
 fi
 
-# 企业微信通知 (Text 格式，确保微信插件可见)
+# 企业微信: 只有当 WX_URL 不为空时才执行
 if [ -n "$WX_URL" ]; then
+    echo "检测到企业微信配置，正在发送通知..."
     curl -s -H "Content-Type: application/json" -X POST "$WX_URL" \
         -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"$MSG\"}}" > /dev/null
 fi
 
-rm -f "$TMP_FILE"
-echo -e "${GREEN}✨ 脚本执行完毕！${NC}"
+echo -e "${GREEN}✨ 任务顺利结束！${NC}"
