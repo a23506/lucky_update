@@ -1,108 +1,92 @@
 #!/bin/bash
 
 # ================= 配置区域 =================
-# 基础下载域名及安装路径
 BASE_URL="http://release.66666.host"
 LUCKY_DIR="/opt/lucky.daji"
-DOMAIN="ai.com" # 占位域名
+DOMAIN="ai.com"
 
-# --- 通知配置 (请填写你的真实信息) ---
+# 通知配置
 TG_BOT_TOKEN="" 
 TG_CHAT_ID=""
-WECHAT_WEBHOOK="" # 企业微信机器人 Webhook 地址
+WECHAT_WEBHOOK=""
 # ===========================================
 
-# 1. 架构识别 (参考官方逻辑，确保兼容 x86 和 ARM)
+# 1. 架构识别
 get_arch() {
-    local arch_raw=$(uname -m)
-    case "$arch_raw" in
+    case "$(uname -m)" in
         x86_64) echo "x86_64" ;;
         aarch64|arm64) echo "arm64" ;;
         armv7l) echo "armv7" ;;
-        *) echo "x86_64" ;; # 默认回退到 x86_64
+        *) echo "x86_64" ;;
     esac
 }
 CPUTYPE=$(get_arch)
 
 # 2. 获取本地版本
 LOCAL_VERSION="0.0.0"
-if [ -f "$LUCKY_DIR/lucky" ]; then
-    LOCAL_INFO=$("$LUCKY_DIR/lucky" -info)
-    LOCAL_VERSION=$(echo "$LOCAL_INFO" | grep -oP '(?<="Version":")[^"]+')
-fi
+[ -f "$LUCKY_DIR/lucky" ] && LOCAL_VERSION=$("$LUCKY_DIR/lucky" -info | grep -oP '(?<="Version":")[^"]+')
 
-# 3. 抓取远程最新版本 (模拟官方 get_versions 逻辑)
-# 自动抓取以 'v' 开头的目录，通过版本号排序取最新一个
+# 3. 抓取远程最新版本标签 (例如 v3.0.0beta3)
 REMOTE_TAG=$(curl -s "$BASE_URL/" | grep -oP '(?<=href="\.\/)[^"/]+' | grep '^v' | sort -V | tail -n 1)
+# 纯版本号 (例如 3.0.0beta3)
 REMOTE_VER=${REMOTE_TAG#v}
+# 基础版本号 (去掉 beta 后缀，例如 3.0.0)
+BASE_VER=$(echo "$REMOTE_VER" | grep -oP '^\d+\.\d+\.\d+')
 
 if [ -z "$REMOTE_VER" ]; then
-    echo "无法连接服务器或解析版本失败。"
+    echo "❌ 无法解析远程版本。"
     exit 1
 fi
 
 # 4. 版本比对
-if [ "$LOCAL_VERSION" == "$REMOTE_VER" ]; then
-    echo "当前版本 ($LOCAL_VERSION) 已是最新，无需更新。"
+if [ "$LOCAL_VERSION" == "$REMOTE_VER" ] || [ "$LOCAL_VERSION" == "$BASE_VER" ]; then
+    echo "当前版本 ($LOCAL_VERSION) 已是最新。"
     exit 0
 fi
 
 echo "发现新版本: $REMOTE_VER，正在为 $CPUTYPE 架构进行更新..."
 
-# 5. 动态拼接下载地址
-# 注意：官方路径中，大版本目录带 v，子目录也可能包含 beta 字样
-SUBDIR="${REMOTE_VER}_wanji_docker"
-# 关键修正：有些版本的包名中，版本号可能不带 'v'，但路径需要
-PKG_NAME="lucky_${REMOTE_VER}_Linux_${CPUTYPE}_wanji_docker.tar.gz"
-
-# 尝试拼接完整的 URL
-DOWNLOAD_URL="$BASE_URL/$REMOTE_TAG/$SUBDIR/$PKG_NAME"
-
-# 6. 下载并替换 (增加 -f 参数检查服务器返回码)
+# 5. 智能下载逻辑 (尝试多种可能的官方路径组合)
 TMP_FILE="/tmp/lucky_update.tar.gz"
-echo "正在下载: $DOWNLOAD_URL"
-# 使用 -f 让 curl 在 404 时返回非零状态码
-curl -fL -o "$TMP_FILE" "$DOWNLOAD_URL"
+SUCCESS=0
 
-if [ $? -ne 0 ]; then
-    echo "❌ 下载失败！请检查链接是否有效: $DOWNLOAD_URL"
-    # 这里可以增加一个兜底逻辑，尝试另一种可能的路径格式
-    echo "尝试备用路径..."
-    # 有些版本子目录可能直接是 wanji_docker 而没有版本号前缀
-    ALT_URL="$BASE_URL/$REMOTE_TAG/wanji_docker/$PKG_NAME"
-    curl -fL -o "$TMP_FILE" "$ALT_URL" || exit 1
+# 组合 1: 完整版本号路径 (3.0.0beta3_wanji_docker)
+URL1="$BASE_URL/$REMOTE_TAG/${REMOTE_VER}_wanji_docker/lucky_${REMOTE_VER}_Linux_${CPUTYPE}_wanji_docker.tar.gz"
+# 组合 2: 基础版本号路径 (3.0.0_wanji_docker)
+URL2="$BASE_URL/$REMOTE_TAG/${BASE_VER}_wanji_docker/lucky_${BASE_VER}_Linux_${CPUTYPE}_wanji_docker.tar.gz"
+
+for DOWNLOAD_URL in "$URL1" "$URL2"; do
+    echo "尝试下载: $DOWNLOAD_URL"
+    # -f 参数确保 404 时返回错误码
+    if curl -fL -o "$TMP_FILE" "$DOWNLOAD_URL"; then
+        SUCCESS=1
+        break
+    fi
+done
+
+if [ $SUCCESS -ne 1 ]; then
+    echo "❌ 所有下载路径均失效，请手动检查服务器目录结构。"
+    exit 1
 fi
 
-# 解压覆盖并清理
-mkdir -p "$LUCKY_DIR"
+# 6. 解压与安装
 tar -zxf "$TMP_FILE" -C "$LUCKY_DIR/" --strip-components=0
 chmod +x "$LUCKY_DIR/lucky" "$LUCKY_DIR/scripts/"*
-rm -f "$TMP_FILE"
 
-# 7. 强制重启逻辑 (按照你的要求释放端口)
+# 7. 强制重启逻辑
 echo "正在重启服务..."
 netstat -tunlp | grep 16601 | awk '{print $7}' | cut -d'/' -f1 | xargs -r kill -9
 systemctl restart lucky.daji
 
-# 8. 发送 Markdown 通知
+# 8. 通知模块
 NEW_INFO=$("$LUCKY_DIR/lucky" -info)
+NEW_VER=$(echo "$NEW_INFO" | grep -oP '(?<="Version":")[^"]+')
 NEW_DATE=$(echo "$NEW_INFO" | grep -oP '(?<="Date":")[^"]+')
-UPDATE_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 
-# 构建消息主体
-TITLE="✅ Lucky 自动更新成功"
-CONTENT="> **节点**: $DOMAIN ($CPUTYPE)\n> **变更**: $LOCAL_VERSION → $REMOTE_VER\n> **编译**: $NEW_DATE\n> **时间**: $UPDATE_TIME"
+MSG="### Lucky 自动更新成功\n> **架构**: $CPUTYPE\n> **变更**: $LOCAL_VERSION -> $NEW_VER\n> **编译**: $NEW_DATE\n> **节点**: $DOMAIN"
 
-# Telegram 通知
-if [ -n "$TG_BOT_TOKEN" ]; then
-    curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
-        -d "chat_id=$TG_CHAT_ID" -d "parse_mode=Markdown" -d "text=*$TITLE*\n$CONTENT" > /dev/null
-fi
+[ -n "$TG_BOT_TOKEN" ] && curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" -d "chat_id=$TG_CHAT_ID" -d "parse_mode=Markdown" -d "text=$(echo -e $MSG)"
+[ -n "$WECHAT_WEBHOOK" ] && curl -s -H "Content-Type: application/json" -X POST "$WECHAT_WEBHOOK" -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$MSG\"}}"
 
-# 企业微信通知
-if [ -n "$WECHAT_WEBHOOK" ]; then
-    curl -s -H "Content-Type: application/json" -X POST "$WECHAT_WEBHOOK" \
-        -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"### $TITLE\n$CONTENT\"}}" > /dev/null
-fi
-
-echo "更新任务顺利结束。"
+rm -f "$TMP_FILE"
+echo "更新任务完成。"
