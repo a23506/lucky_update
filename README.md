@@ -18,3 +18,7 @@ curl -sSL [https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky
 chmod +x /root/auto_lucky.sh && \
 (crontab -l 2>/dev/null | grep -v "auto_lucky.sh"; echo "0 23 * * * /bin/bash /root/auto_lucky.sh >> /var/log/lucky_update.log 2>&1") | crontab - && \
 echo "Lucky 自动更新环境配置完成！"
+
+
+```bash
+curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash
