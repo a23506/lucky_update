@@ -38,5 +38,5 @@ export $(grep -v '^#' /opt/lucky.daji/.env | xargs) && curl -sSL https://raw.git
 ``` bash
 # 复制这一整段到终端执行，它会自动帮你把带参数的远程定时任务写进 crontab
 # 每天凌晨 02:30 远程拉取脚本并带参数执行
-(crontab -l 2>/dev/null | grep -v "lucky_update"; echo "30 2 * * * export $(grep -v '^#' /opt/lucky.daji/.env | xargs) && curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash -s -- -t "${TG_TOKEN:-}" -i "${TG_ID:-}" -w "${WX_URL:-}" -d "${DOMAIN:-AWS-Node}" >> /var/log/lucky_update.log 2>&1") | crontab -
+(crontab -l 2>/dev/null | grep -v "lucky_update"; echo "30 2 * * * export $(grep -v '^#' /opt/lucky.daji/.env | xargs) && curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash -s -- -t "${TG_TOKEN:-}" -i "${TG_ID:-}" -w "${WX_URL:-}" -d "${DOMAIN:-}" >> /var/log/lucky_update.log 2>&1") | crontab -
 ```
