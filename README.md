@@ -10,18 +10,23 @@
 * **双平台通知**：集成 Telegram 和企业微信 Webhook 通知，支持 Markdown 格式，实时反馈更新状态、版本号及编译日期。
 
 ## 🚀 一键部署
-
-在 **Root** 用户下执行以下命令，脚本将自动下载到 `/root` 目录，赋予执行权限，并添加每晚 23:00 执行的 Cron 定时任务：
-
-```bash
-curl -sSL [https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh](https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh) -o /root/auto_lucky.sh && \
-chmod +x /root/auto_lucky.sh && \
-(crontab -l 2>/dev/null | grep -v "auto_lucky.sh"; echo "0 23 * * * /bin/bash /root/auto_lucky.sh >> /var/log/lucky_update.log 2>&1") | crontab - && \
-echo "Lucky 自动更新环境配置完成！"
-```
-
-## 调测
-
 ```bash
 curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash
+```
+
+## 带webhook通知的URL
+``` bash
+curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash -s -- -t "你的TG_TOKEN" -i "你的TG_ID" -w "你的微信URL" -d "设备名称"
+```
+
+# 配置定时任务
+
+## 创建日志文件
+``` bash
+touch /var/log/lucky_update.log && chmod 666 /var/log/lucky_update.log
+```
+
+``` bash
+# 每天凌晨 02:30 远程拉取脚本并带参数执行
+30 2 * * * curl -sSL https://raw.githubusercontent.com/a23506/lucky_update/main/auto_lucky.sh | bash -s -- -t "你的TG_TOKEN" -i "你的TG_ID" -w "你的微信URL" -d "设备名称" >> /var/log/lucky_update.log 2>&1
 ```
