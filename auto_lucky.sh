@@ -64,11 +64,18 @@ require_cmd() {
     }
 }
 
+build_node_block() {
+    if [ -n "${DOMAIN:-}" ]; then
+        printf '节点: %s\n' "$DOMAIN"
+    fi
+}
+
 notify_all() {
     local msg="$1"
 
     if [ -n "${TG_TOKEN:-}" ] && [ -n "${TG_ID:-}" ]; then
-        curl -fsS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+        curl -4 -fsS --connect-timeout 10 --max-time 30 \
+            -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_ID}" \
             --data-urlencode "text=${msg}" \
             >/dev/null 2>&1 || echo "Telegram 通知失败"
@@ -78,7 +85,9 @@ notify_all() {
         local esc_msg
         esc_msg=$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || true)
         if [ -n "$esc_msg" ]; then
-            curl -fsS -H "Content-Type: application/json" -X POST "$WX_URL" \
+            curl -4 -fsS --connect-timeout 10 --max-time 30 \
+                -H "Content-Type: application/json" \
+                -X POST "$WX_URL" \
                 -d "{\"msgtype\":\"text\",\"text\":{\"content\":${esc_msg}}}" \
                 >/dev/null 2>&1 || echo "企业微信通知失败"
         else
@@ -87,10 +96,44 @@ notify_all() {
     fi
 }
 
-build_node_line() {
-    if [ -n "${DOMAIN:-}" ]; then
-        printf '节点: %s\n' "$DOMAIN"
-    fi
+wait_for_network() {
+    local i
+    for i in 1 2 3 4 5; do
+        if getent hosts release.66666.host >/dev/null 2>&1; then
+            return 0
+        fi
+        echo "等待网络/DNS 就绪... (${i}/5)"
+        sleep 5
+    done
+
+    echo "❌ DNS 解析失败: release.66666.host"
+    return 1
+}
+
+resolve_and_fetch_release_page() {
+    local content=""
+    local i
+
+    for i in 1 2 3; do
+        echo "尝试获取发布页，第 ${i} 次..."
+
+        content="$(curl -4 -fsSL \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --retry 2 \
+            --retry-delay 2 \
+            "$BASE_URL/" 2>/dev/null || true)"
+
+        if [ -n "$content" ]; then
+            printf '%s' "$content"
+            return 0
+        fi
+
+        sleep 2
+    done
+
+    echo "❌ 无法访问发布页: $BASE_URL"
+    return 1
 }
 
 rollback_install() {
@@ -101,17 +144,16 @@ rollback_install() {
     echo "⚠️ 检测到部署失败，开始自动回滚主程序..."
     mkdir -p "$LUCKY_DIR"
 
-    # 删除当前安装目录中除 backup 外的所有内容
     find "$LUCKY_DIR" -mindepth 1 -maxdepth 1 ! -name backup -exec rm -rf {} +
 
-    # 恢复旧程序文件（保留新的 backup 目录）
     if [ -d "${ROLLBACK_DIR:-}" ]; then
         ( cd "$ROLLBACK_DIR" && tar -cf - . ) | ( cd "$LUCKY_DIR" && tar -xf - )
     fi
 
-    # 恢复旧 service 文件（如果之前有）
-    if [ -f "${SERVICE_BACKUP:-}" ]; then
+    if [ -s "${SERVICE_BACKUP:-}" ]; then
         cp -af "$SERVICE_BACKUP" "$SERVICE_FILE"
+    elif [ -f "$SERVICE_FILE" ]; then
+        rm -f "$SERVICE_FILE"
     fi
 
     rm -f "$OLD_SERVICE_FILE" 2>/dev/null || true
@@ -145,18 +187,18 @@ trap cleanup EXIT
 on_error() {
     local line_no="$1"
     local exit_code="${2:-1}"
-    local end_time duration node_line msg
+    local end_time duration node_block msg
 
     rollback_install || true
 
     end_time=$(date +%s)
     duration=$((end_time - START_TIME))
-    node_line="$(build_node_line)"
+    node_block="$(build_node_block)"
 
     msg="Lucky 自动部署/更新失败
 ----------------------
 主机: $(hostname)
-${node_line}时间: $(date '+%Y-%m-%d %H:%M:%S')
+${node_block}时间: $(date '+%Y-%m-%d %H:%M:%S')
 耗时: ${duration}s
 出错行: ${line_no}
 退出码: ${exit_code}
@@ -177,7 +219,7 @@ trap 'on_error ${LINENO} $?' ERR
 [ "$(id -u)" -eq 0 ] || { echo "❌ 请以 root 身份运行"; exit 1; }
 [ -d /run/systemd/system ] || { echo "❌ 当前系统不是 systemd 环境"; exit 1; }
 
-for cmd in curl grep sed sort tar systemctl mktemp stat python3 find cp rm wc awk df dirname; do
+for cmd in curl grep sed sort tar systemctl mktemp stat python3 find cp rm wc awk df dirname getent; do
     require_cmd "$cmd"
 done
 
@@ -213,8 +255,12 @@ else
 fi
 
 # ================= 远端最新版本 =================
+wait_for_network || exit 1
+
+RELEASE_PAGE="$(resolve_and_fetch_release_page)"
+
 REMOTE_TAG="$(
-    curl -fsSL "$BASE_URL/" |
+    printf '%s' "$RELEASE_PAGE" |
     grep -Eo 'href="\./v[^"/]+/?' |
     sed -E 's/^href="\.\/(v[^"/]+)\/?/\1/' |
     sort -V |
@@ -252,9 +298,9 @@ SERVICE_BACKUP="$(mktemp /tmp/lucky_service_backup.XXXXXX)"
 URL1="$BASE_URL/$REMOTE_TAG/${BASE_VER}_wanji_docker/lucky_${BASE_VER}_Linux_${CPUTYPE}_wanji_docker.tar.gz"
 URL2="$BASE_URL/$REMOTE_TAG/${REMOTE_VER}_wanji_docker/lucky_${REMOTE_VER}_Linux_${CPUTYPE}_wanji_docker.tar.gz"
 
-if curl -fL --retry 2 --connect-timeout 15 --max-time 300 -o "$TMP_FILE" "$URL1"; then
+if curl -4 -fL --retry 2 --retry-delay 2 --connect-timeout 15 --max-time 300 -o "$TMP_FILE" "$URL1"; then
     echo -e "${GREEN}下载成功 (Path A)${NC}"
-elif curl -fL --retry 2 --connect-timeout 15 --max-time 300 -o "$TMP_FILE" "$URL2"; then
+elif curl -4 -fL --retry 2 --retry-delay 2 --connect-timeout 15 --max-time 300 -o "$TMP_FILE" "$URL2"; then
     echo -e "${GREEN}下载成功 (Path B)${NC}"
 else
     echo -e "${RED}❌ 下载失败 (Path A / Path B 均不可用)${NC}"
@@ -426,18 +472,17 @@ fi
 # ================= 成功后写入版本 =================
 echo "$REMOTE_TAG" > "$VER_RECORD"
 
-# 成功后不再允许回滚
 DEPLOY_STARTED=0
 
 # ================= 通知 =================
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
-NODE_LINE="$(build_node_line)"
+NODE_BLOCK="$(build_node_block)"
 
 MSG="Lucky 自动部署/更新成功
 ----------------------
 主机: $(hostname)
-${NODE_LINE}架构: $CPUTYPE
+${NODE_BLOCK}架构: $CPUTYPE
 版本: $LOCAL_TAG -> $REMOTE_TAG
 备份目录: $BACKUP_DIR
 耗时: ${DURATION}s
